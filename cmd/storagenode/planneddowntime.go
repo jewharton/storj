@@ -40,21 +40,9 @@ func (client *plannedDowntimeClient) add(ctx context.Context, start time.Time, d
 	})
 }
 
-/*
-func (client *plannedDowntimeClient) getScheduled(ctx context.Context) (*internalpb.GetScheduledResponse, error) {
+func (client *plannedDowntimeClient) list(ctx context.Context) (*internalpb.GetScheduledResponse, error) {
 	return internalpb.NewDRPCNodePlannedDowntimeClient(client.conn).GetScheduled(ctx, &internalpb.GetScheduledRequest{})
 }
-
-func (client *plannedDowntimeClient) getCompleted(ctx context.Context) (*internalpb.GetCompletedResponse, error) {
-	return internalpb.NewDRPCNodePlannedDowntimeClient(client.conn).GetCompleted(ctx, &internalpb.GetCompletedRequest{})
-}
-
-func (client *plannedDowntimeClient) delete(ctx context.Context, id []byte) (*internalpb.DeleteResponse, error) {
-	return internalpb.NewDRPCNodePlannedDowntimeClient(client.conn).Delete(ctx, &internalpb.DeleteRequest{
-		Id: id,
-	})
-}
-*/
 
 func (client *plannedDowntimeClient) close() error {
 	return client.conn.Close()
@@ -70,7 +58,6 @@ func cmdAddPlannedDowntime(cmd *cobra.Command, args []string) error {
 		zap.L().Info("Identity loaded.", zap.Stringer("Node ID", ident.ID))
 	}
 
-	// TODO prompt for time
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "Please enter the date you would like your planned downtime to begin. Press enter to continue:")
 
@@ -119,6 +106,40 @@ func cmdAddPlannedDowntime(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("Successfully added planned downtime.")
+
+	return nil
+}
+
+func cmdListPlannedDowntime(cmd *cobra.Command, args []string) error {
+	ctx, _ := process.Ctx(cmd)
+
+	ident, err := runCfg.Identity.Load()
+	if err != nil {
+		zap.L().Fatal("Failed to load identity.", zap.Error(err))
+	} else {
+		zap.L().Info("Identity loaded.", zap.Stringer("Node ID", ident.ID))
+	}
+
+	client, err := dialPlannedDowntimeClient(ctx, diagCfg.Server.PrivateAddress)
+	if err != nil {
+		return errs.Wrap(err)
+	}
+	defer func() {
+		if err := client.close(); err != nil {
+			zap.L().Debug("Closing planned downtime client failed.", zap.Error(err))
+		}
+	}()
+
+	res, err := client.list(ctx)
+	if err != nil {
+		fmt.Println("Can't list planned downtime.")
+		return errs.Wrap(err)
+	}
+
+	fmt.Println("\nStart Time\t\t\tEnd Time")
+	for _, e := range res.Entries {
+		fmt.Printf("%s\t%s\n", e.Start.String(), e.End.String())
+	}
 
 	return nil
 }

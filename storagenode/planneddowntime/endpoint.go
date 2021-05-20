@@ -5,7 +5,6 @@ package planneddowntime
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/zeebo/errs"
@@ -13,6 +12,7 @@ import (
 
 	"storj.io/common/pb"
 	"storj.io/common/rpc"
+	rand "storj.io/common/testrand"
 	"storj.io/storj/storagenode/internalpb"
 	"storj.io/storj/storagenode/satellites"
 	"storj.io/storj/storagenode/trust"
@@ -26,19 +26,21 @@ type Endpoint struct {
 	trust      *trust.Pool
 	satellites satellites.DB
 	dialer     rpc.Dialer
+	service    Service
 }
 
 // NewEndpoint creates a new planned downtime endpoint.
-func NewEndpoint(log *zap.Logger, trust *trust.Pool, satellites satellites.DB, dialer rpc.Dialer) *Endpoint {
+func NewEndpoint(log *zap.Logger, trust *trust.Pool, satellites satellites.DB, dialer rpc.Dialer, service Service) *Endpoint {
 	return &Endpoint{
 		log:        log,
 		trust:      trust,
 		satellites: satellites,
 		dialer:     dialer,
+		service:    service,
 	}
 }
 
-// GetNonExitingSatellites returns a list of satellites that the storagenode has not begun a graceful exit for.
+// Add adds a new planned downtime on the satellites and the local db.
 func (e *Endpoint) Add(ctx context.Context, req *internalpb.AddRequest) (_ *internalpb.AddResponse, err error) {
 	e.log.Debug("initialize planned downtime: Add")
 
@@ -73,8 +75,37 @@ func (e *Endpoint) Add(ctx context.Context, req *internalpb.AddRequest) (_ *inte
 			return &internalpb.AddResponse{}, errs.Wrap(err)
 		}
 	}
-	fmt.Println(req.DurationHours)
-	fmt.Println(req.Start)
+	err = e.service.Add(ctx, Entry{
+		ID:          rand.BytesInt(32),
+		Start:       req.Start,
+		End:         req.Start.Add(time.Duration(req.DurationHours) * time.Hour),
+		ScheduledAt: time.Now(),
+	})
+	if err != nil {
+		return &internalpb.AddResponse{}, errs.Wrap(err)
+	}
 
 	return &internalpb.AddResponse{}, nil
+}
+
+// GetScheduled gets a list of existing planned downtimes.
+func (e *Endpoint) GetScheduled(ctx context.Context, req *internalpb.GetScheduledRequest) (_ *internalpb.GetScheduledResponse, err error) {
+	e.log.Debug("initialize planned downtime: GetScheduled")
+
+	list, err := e.service.GetScheduled(ctx, time.Now())
+	if err != nil {
+		return &internalpb.GetScheduledResponse{}, errs.Wrap(err)
+	}
+
+	pbEntries := []*internalpb.Entry{}
+	for _, item := range list {
+		pbEntries = append(pbEntries, &internalpb.Entry{
+			Id:    item.ID,
+			Start: item.Start,
+			End:   item.End,
+		})
+	}
+	return &internalpb.GetScheduledResponse{
+		Entries: pbEntries,
+	}, nil
 }

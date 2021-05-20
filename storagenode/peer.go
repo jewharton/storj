@@ -779,6 +779,7 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB, revocationDB exten
 			peer.Storage2.Trust,
 			peer.DB.Satellites(),
 			peer.Dialer,
+			peer.PlannedDowntime.Service,
 		)
 		if err := internalpb.DRPCRegisterNodePlannedDowntime(peer.Server.PrivateDRPC(), peer.PlannedDowntime.Endpoint); err != nil {
 			return nil, errs.Combine(err, peer.Close())
