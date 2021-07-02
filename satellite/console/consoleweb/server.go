@@ -90,6 +90,8 @@ type Config struct {
 	LinksharingURL                  string  `help:"url link for linksharing requests" default:"https://link.us1.storjshare.io"`
 	PathwayOverviewEnabled          bool    `help:"indicates if the overview onboarding step should render with pathways" default:"true"`
 
+	ABTesting consoleapi.ABTestingConfig
+
 	RateLimit web.IPRateLimiterConfig
 
 	console.Config
@@ -228,6 +230,12 @@ func NewServer(logger *zap.Logger, config Config, service *console.Service, mail
 	authRouter.Handle("/forgot-password/{email}", server.rateLimiter.Limit(http.HandlerFunc(authController.ForgotPassword))).Methods(http.MethodPost)
 	authRouter.Handle("/resend-email/{id}", server.rateLimiter.Limit(http.HandlerFunc(authController.ResendEmail))).Methods(http.MethodPost)
 
+	if config.ABTesting.Enabled {
+		abController := consoleapi.NewABTesting(logger, config.ABTesting)
+		abRouter := router.PathPrefix("/api/v0/ab").Subrouter()
+		abRouter.Handle("/passphrase-entry-required", server.withAuth(http.HandlerFunc(abController.GetPassphraseEntryRequired))).Methods(http.MethodGet)
+	}
+
 	paymentController := consoleapi.NewPayments(logger, service)
 	paymentsRouter := router.PathPrefix("/api/v0/payments").Subrouter()
 	paymentsRouter.Use(server.withAuth)
@@ -358,6 +366,7 @@ func (server *Server) appHandler(w http.ResponseWriter, r *http.Request) {
 		StorageTBPrice                  string
 		EgressTBPrice                   string
 		ObjectPrice                     string
+		ABTestingEnabled                bool
 	}
 
 	data.ExternalAddress = server.config.ExternalAddress
@@ -380,6 +389,7 @@ func (server *Server) appHandler(w http.ResponseWriter, r *http.Request) {
 	data.StorageTBPrice = server.pricing.StorageTBPrice
 	data.EgressTBPrice = server.pricing.EgressTBPrice
 	data.ObjectPrice = server.pricing.ObjectPrice
+	data.ABTestingEnabled = server.config.ABTesting.Enabled
 
 	if server.templates.index == nil {
 		server.log.Error("index template is not set")

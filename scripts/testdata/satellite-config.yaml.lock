@@ -67,6 +67,15 @@ compensation.rates.put-tb: "0"
 # comma separated monthly withheld percentage rates
 compensation.withheld-percents: 75,75,75,50,50,50,25,25,25,0,0,0,0,0,0
 
+# the Flagship API key
+# console.ab-testing.api-key: ""
+
+# the prefix of the API URL to receive information about campaign variations; campaign ID will be suffixed when sending requests
+# console.ab-testing.base-variation-url: https://decision.flagship.io/v2/ENVIRONMENT_ID/campaigns/
+
+# whether or not AB testing is enabled
+# console.ab-testing.enabled: false
+
 # url link for account activation redirect
 # console.account-activation-redirect-url: ""
 

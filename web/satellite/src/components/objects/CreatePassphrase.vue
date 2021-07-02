@@ -20,9 +20,13 @@ import { Component, Vue } from 'vue-property-decorator';
 
 import GeneratePassphrase from '@/components/common/GeneratePassphrase.vue';
 
+import { ABHttpApi } from '@/api/abTesting';
 import { RouteConfig } from '@/router';
 import { OBJECTS_ACTIONS } from '@/store/modules/objects';
+import { PassphraseEntryInfo } from '@/types/abTesting';
+import { NavigationLink } from '@/types/navigation';
 import { LocalData, UserIDPassSalt } from '@/utils/localData';
+import { MetaUtils } from '@/utils/meta';
 
 @Component({
     components: {
@@ -30,8 +34,12 @@ import { LocalData, UserIDPassSalt } from '@/utils/localData';
     },
 })
 export default class CreatePassphrase extends Vue {
+    private readonly abTesting: ABHttpApi = new ABHttpApi();
+
     private isLoading: boolean = false;
     private keyToBeStored: string = '';
+    private passphraseEntryRequired: boolean = true;
+    private abTestingEnabled: boolean = MetaUtils.getMetaContent('ab-testing-enabled') === 'true';
 
     public passphrase: string = '';
 
@@ -43,6 +51,9 @@ export default class CreatePassphrase extends Vue {
         const idPassSalt: UserIDPassSalt | null = LocalData.getUserIDPassSalt();
         if (idPassSalt && idPassSalt.userId === this.$store.getters.user.id) {
             this.$router.push({name: RouteConfig.EnterPassphrase.name});
+        }
+        if (this.abTestingEnabled) {
+            this.initPassphraseEntryRequired();
         }
     }
 
@@ -78,7 +89,8 @@ export default class CreatePassphrase extends Vue {
 
         this.isLoading = false;
 
-        await this.$router.push({name: RouteConfig.EnterPassphrase.name});
+        const nextNav: NavigationLink = this.passphraseEntryRequired ? RouteConfig.EnterPassphrase : RouteConfig.BucketsManagement;
+        await this.$router.push({name: nextNav.name});
     }
 
     /**
@@ -93,6 +105,19 @@ export default class CreatePassphrase extends Vue {
                 error ? reject(error) : response(key);
             });
         });
+    }
+
+    /**
+     * Determines whether to display the passphrase entry screen
+     * immediately after the passphrase creation screen.
+     */
+    private async initPassphraseEntryRequired(): Promise<void> {
+        try {
+            const info: PassphraseEntryInfo = await this.abTesting.getPassphraseEntryRequired();
+            this.passphraseEntryRequired = info.required;
+        } catch (error) {
+            this.$notify.error(error.message);
+        }
     }
 }
 </script>
