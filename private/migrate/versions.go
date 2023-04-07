@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -158,6 +159,8 @@ func (migration *Migration) Run(ctx context.Context, log *zap.Logger) error {
 
 	initialSetup := false
 	for i, step := range migration.Steps {
+		log.Info(fmt.Sprintf("STEP %d: Begin", i))
+
 		step := step
 
 		if step.CreateDB != nil {
@@ -194,6 +197,7 @@ func (migration *Migration) Run(ctx context.Context, log *zap.Logger) error {
 		}
 
 		err = txutil.WithTx(ctx, db, nil, func(ctx context.Context, tx tagsql.Tx) error {
+			log.Info(fmt.Sprintf("STEP %d: TX run", i))
 			err = step.Action.Run(ctx, stepLog, db, tx)
 			if err != nil {
 				return err
@@ -203,6 +207,7 @@ func (migration *Migration) Run(ctx context.Context, log *zap.Logger) error {
 			if err != nil {
 				return err
 			}
+			log.Info(fmt.Sprintf("STEP %d: TX end", i))
 			return nil
 		})
 		if err != nil {
