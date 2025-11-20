@@ -5,6 +5,7 @@ package metainfo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 	"unsafe"
@@ -427,6 +428,10 @@ func (endpoint *Endpoint) DeleteObjects(ctx context.Context, req *pb.DeleteObjec
 		}
 
 		addDeleteObjectsResultToProto(resp, deleteObjectsResult, req.Quiet)
+
+		optsJson, _ := json.MarshalIndent(deleteObjectsOpts, "", "\t")
+		resultJson, _ := json.MarshalIndent(deleteObjectsResult, "", "\t")
+		fmt.Printf("DeleteObjects options:\n%s\n\nDeleteObjects result:\n%s\n\n", string(optsJson), string(resultJson))
 	}
 
 	return resp, nil
