@@ -111,7 +111,7 @@ func (c *CommitObject) Verify() error {
 	}
 
 	if c.OverrideEncryptedMetadata {
-		err := c.EncryptedUserData.Verify()
+		err := c.EncryptedUserData.Verify(VerifyEncryptedUserData{})
 		if err != nil {
 			return err
 		}
@@ -659,7 +659,7 @@ func (c *CommitInlineObject) Verify() error {
 		return ErrInvalidRequest.New("Encryption.BlockSize is negative or zero")
 	}
 
-	err := c.EncryptedUserData.Verify()
+	err := c.EncryptedUserData.Verify(VerifyEncryptedUserData{})
 	if err != nil {
 		return err
 	}

@@ -4,6 +4,8 @@ go 1.25.0
 
 replace storj.io/storj => ../../
 
+replace storj.io/common => github.com/jewharton/storj-common v0.0.0-20260328020406-acac5312e030
+
 require (
 	github.com/spacemonkeygo/monkit/v3 v3.0.25-0.20260113195619-706ad4b46206
 	github.com/spf13/pflag v1.0.5

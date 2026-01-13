@@ -121,7 +121,7 @@ func (finishCopy FinishCopyObject) Verify() error {
 
 	if finishCopy.OverrideMetadata {
 		// check whether new metadata is valid
-		err := finishCopy.NewEncryptedUserData.Verify()
+		err := finishCopy.NewEncryptedUserData.Verify(VerifyEncryptedUserData{})
 		if err != nil {
 			return err
 		}

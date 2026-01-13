@@ -4,6 +4,8 @@ go 1.25.0
 
 replace storj.io/storj => ../../
 
+replace storj.io/common => github.com/jewharton/storj-common v0.0.0-20260328020406-acac5312e030
+
 require (
 	github.com/stretchr/testify v1.11.1
 	github.com/zeebo/errs v1.4.0

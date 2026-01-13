@@ -320,7 +320,7 @@ func (db *DB) FinishMoveObject(ctx context.Context, opts FinishMoveObject) (err 
 			EncryptedETag:                 metadataStub,
 			EncryptedMetadataNonce:        metadataKeyNonce,
 			EncryptedMetadataEncryptedKey: opts.NewEncryptedMetadataEncryptedKey,
-		}.Verify()
+		}.Verify(VerifyEncryptedUserData{})
 		if err != nil {
 			return err
 		}
