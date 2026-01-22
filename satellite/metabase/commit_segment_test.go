@@ -1005,6 +1005,64 @@ func testCommitSegment(t *testing.T, useMutations bool) {
 				Segments: []metabase.RawSegment{segment},
 			}.Check(ctx, t, db)
 		})
+
+		t.Run("Checksum", func(t *testing.T) {
+			defer metabasetest.DeleteAll{}.Check(ctx, t, db)
+
+			rootPieceID := testrand.PieceID()
+			pieces := metabase.Pieces{{Number: 0, StorageNode: testrand.NodeID()}}
+			encryptedKey := testrand.Bytes(32)
+			encryptedKeyNonce := testrand.Bytes(32)
+			encryptedChecksum := testrand.Bytes(32)
+
+			object := metabasetest.BeginObjectExactVersion{
+				Opts: metabase.BeginObjectExactVersion{
+					ObjectStream: obj,
+					Encryption:   metabasetest.DefaultEncryption,
+				},
+			}.Check(ctx, t, db)
+
+			metabasetest.CommitSegment{
+				Opts: metabase.CommitSegment{
+					ObjectStream: obj,
+					RootPieceID:  rootPieceID,
+					Pieces:       pieces,
+
+					EncryptedKey:      encryptedKey,
+					EncryptedKeyNonce: encryptedKeyNonce,
+
+					EncryptedSize:       1024,
+					PlainSize:           512,
+					PlainOffset:         0,
+					Redundancy:          metabasetest.DefaultRedundancy,
+					EncryptedChecksum:   encryptedChecksum,
+					TestingUseMutations: useMutations,
+				},
+			}.Check(ctx, t, db)
+
+			metabasetest.Verify{
+				Objects: metabasetest.ObjectsToRaw(object),
+				Segments: []metabase.RawSegment{
+					{
+						StreamID:  obj.StreamID,
+						CreatedAt: object.CreatedAt,
+
+						RootPieceID:       rootPieceID,
+						EncryptedKey:      encryptedKey,
+						EncryptedKeyNonce: encryptedKeyNonce,
+
+						EncryptedSize:     1024,
+						PlainOffset:       0,
+						PlainSize:         512,
+						EncryptedChecksum: encryptedChecksum,
+
+						Redundancy: metabasetest.DefaultRedundancy,
+
+						Pieces: pieces,
+					},
+				},
+			}.Check(ctx, t, db)
+		})
 	})
 }
 
@@ -1581,6 +1639,63 @@ func TestCommitInlineSegment(t *testing.T) {
 
 			metabasetest.Verify{
 				Segments: []metabase.RawSegment{segment},
+			}.Check(ctx, t, db)
+		})
+
+		t.Run("Checksum", func(t *testing.T) {
+			defer metabasetest.DeleteAll{}.Check(ctx, t, db)
+
+			rootPieceID := testrand.PieceID()
+			pieces := metabase.Pieces{{Number: 0, StorageNode: testrand.NodeID()}}
+			encryptedKey := testrand.Bytes(32)
+			encryptedKeyNonce := testrand.Bytes(32)
+			encryptedChecksum := testrand.Bytes(32)
+
+			object := metabasetest.BeginObjectExactVersion{
+				Opts: metabase.BeginObjectExactVersion{
+					ObjectStream: obj,
+					Encryption:   metabasetest.DefaultEncryption,
+				},
+			}.Check(ctx, t, db)
+
+			metabasetest.CommitSegment{
+				Opts: metabase.CommitSegment{
+					ObjectStream: obj,
+					RootPieceID:  rootPieceID,
+					Pieces:       pieces,
+
+					EncryptedKey:      encryptedKey,
+					EncryptedKeyNonce: encryptedKeyNonce,
+
+					EncryptedSize:     1024,
+					PlainSize:         512,
+					PlainOffset:       0,
+					Redundancy:        metabasetest.DefaultRedundancy,
+					EncryptedChecksum: encryptedChecksum,
+				},
+			}.Check(ctx, t, db)
+
+			metabasetest.Verify{
+				Objects: metabasetest.ObjectsToRaw(object),
+				Segments: []metabase.RawSegment{
+					{
+						StreamID:  obj.StreamID,
+						CreatedAt: object.CreatedAt,
+
+						RootPieceID:       rootPieceID,
+						EncryptedKey:      encryptedKey,
+						EncryptedKeyNonce: encryptedKeyNonce,
+
+						EncryptedSize:     1024,
+						PlainOffset:       0,
+						PlainSize:         512,
+						EncryptedChecksum: encryptedChecksum,
+
+						Redundancy: metabasetest.DefaultRedundancy,
+
+						Pieces: pieces,
+					},
+				},
 			}.Check(ctx, t, db)
 		})
 	})
