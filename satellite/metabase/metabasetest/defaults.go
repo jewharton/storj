@@ -211,6 +211,7 @@ func DefaultRawSegment(obj metabase.ObjectStream, segmentPosition metabase.Segme
 		EncryptedKey:      []byte{3},
 		EncryptedKeyNonce: []byte{4},
 		EncryptedETag:     []byte{5},
+		EncryptedChecksum: []byte{6},
 
 		EncryptedSize: 1024,
 		PlainSize:     512,
@@ -229,6 +230,7 @@ func DefaultRawInlineSegment(obj metabase.ObjectStream, segmentPosition metabase
 		EncryptedKey:      []byte{3},
 		EncryptedKeyNonce: []byte{4},
 		EncryptedETag:     []byte{5},
+		EncryptedChecksum: []byte{6},
 
 		EncryptedSize: 3,
 		PlainSize:     2,
