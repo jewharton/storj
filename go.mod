@@ -2,7 +2,7 @@ module storj.io/storj
 
 go 1.25.0
 
-replace storj.io/common => github.com/jewharton/storj-common v0.0.0-20260328020406-acac5312e030
+replace storj.io/common => github.com/jewharton/storj-common v0.0.0-20260328154443-b1e29f37ced2
 
 // Ignore directories and files that are not relevant to Go.
 ignore (
