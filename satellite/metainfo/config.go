@@ -412,3 +412,8 @@ func (c *Config) isNoPendingObjectUploadEnabled(projectID uuid.UUID) bool {
 	_, exists := c.TestingNoPendingObjectUploadProjects[projectID]
 	return exists
 }
+
+// TestingSetChecksumsEnabled sets whether object and segment checksums are allowed to be set in requests.
+func (endpoint *Endpoint) TestingSetChecksumsEnabled(enabled bool) {
+	endpoint.config.ChecksumsEnabled = enabled
+}
