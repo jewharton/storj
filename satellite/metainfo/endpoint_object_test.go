@@ -66,12 +66,27 @@ import (
 const (
 	objectLockedErrMsg       = "object is protected by Object Lock settings"
 	objectInvalidStateErrMsg = "The operation is not permitted for this object"
+	checksumsDisabledErrMsg  = "Checksum options may not be provided at this time"
 )
 
 func assertRPCStatusCode(t *testing.T, actualError error, expectedStatusCode rpcstatus.StatusCode) {
 	statusCode := rpcstatus.Code(actualError)
 	require.NotEqual(t, rpcstatus.Unknown, statusCode, "expected rpcstatus error, got \"%v\"", actualError)
 	require.Equal(t, expectedStatusCode, statusCode, "wrong %T, got %v", statusCode, actualError)
+}
+
+// requireRPCStatus functions identically to rpctest.RequireStatus but allows a format string and arguments to be provided.
+func requireRPCStatus(tb testing.TB, err error, expectedCode rpcstatus.StatusCode, expectedCause string, msgAndArgs ...any) {
+	code := rpcstatus.Code(err)
+	var cause string
+	if err != nil {
+		cause = err.Error()
+	}
+	if code != expectedCode || cause != expectedCause {
+		tb.Helper()
+		assert.Fail(tb, fmt.Sprintf("rpc code=%q cause=%q does not match expected code=%q cause=%q", code, cause, expectedCode, expectedCause), msgAndArgs)
+		tb.FailNow()
+	}
 }
 
 func TestBeginObject(t *testing.T) {
@@ -106,10 +121,10 @@ func TestBeginObject(t *testing.T) {
 			return []metabase.ObjectEntry(collector), nil
 		}
 
-		requireNoPendingObjects := func(ctx context.Context, t *testing.T, bucketName, objectKey string) {
+		requireNoPendingObjects := func(ctx context.Context, t *testing.T, bucketName, objectKey string, msgAndArgs ...any) {
 			objects, err := getPendingObjects(ctx, bucketName, objectKey)
-			require.NoError(t, err)
-			require.Empty(t, objects)
+			require.NoError(t, err, msgAndArgs)
+			require.Empty(t, objects, msgAndArgs)
 		}
 
 		t.Run("Basic", func(t *testing.T) {
@@ -294,9 +309,8 @@ func TestBeginObject(t *testing.T) {
 
 			userData, err := randEncryptedUserDataWithChecksum(encParams, 0)
 			require.NoError(t, err)
-			userData.Checksum.IsComposite = true
 
-			validReq := pb.BeginObjectRequest{
+			baseReq := pb.BeginObjectRequest{
 				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
 				Bucket:             []byte(bucketName),
 				EncryptedObjectKey: []byte(objectKey),
@@ -307,29 +321,23 @@ func TestBeginObject(t *testing.T) {
 				EncryptedMetadata:             userData.EncryptedMetadata,
 				EncryptedMetadataNonce:        pb.Nonce(userData.EncryptedMetadataNonce),
 				EncryptedMetadataEncryptedKey: userData.EncryptedMetadataEncryptedKey,
-				ChecksumAlgorithm:             pb.ObjectChecksumAlgorithm(userData.Checksum.Algorithm),
-				IsChecksumComposite:           userData.Checksum.IsComposite,
-				EncryptedChecksum:             userData.Checksum.EncryptedValue,
 			}
 
-			req := validReq
-			req.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_SHA256 + 1
-			_, err = endpoint.BeginObject(ctx, &req)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumAlgorithmInvalid, "The checksum algorithm is invalid")
-			requireNoPendingObjects(ctx, t, bucketName, objectKey)
+			for _, scenario := range invalidChecksumOptionsScenarios {
+				// BeginObject requests are allowed to omit encrypted checksums.
+				if scenario.checksumAlgorithm != pb.ObjectChecksumAlgorithm_NONE && scenario.encryptedChecksum == nil {
+					continue
+				}
 
-			req = validReq
-			req.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_NONE
-			_, err = endpoint.BeginObject(ctx, &req)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumTypeUnexpected, "A checksum type must not be provided if a checksum algorithm is not provided")
-			requireNoPendingObjects(ctx, t, bucketName, objectKey)
+				req := baseReq
+				req.ChecksumAlgorithm = scenario.checksumAlgorithm
+				req.IsChecksumComposite = scenario.isChecksumComposite
+				req.EncryptedChecksum = scenario.encryptedChecksum
 
-			req = validReq
-			req.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_NONE
-			req.IsChecksumComposite = false
-			_, err = endpoint.BeginObject(ctx, &req)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumUnexpected, "A checksum must not be provided if a checksum algorithm is not provided")
-			requireNoPendingObjects(ctx, t, bucketName, objectKey)
+				_, err = endpoint.BeginObject(ctx, &req)
+				requireRPCStatus(t, err, scenario.statusCode, scenario.errMsg, scenario.name)
+				requireNoPendingObjects(ctx, t, bucketName, objectKey, scenario.name)
+			}
 		})
 
 		// Ensure that requests are allowed to contain checksum options that omit the encrypted checksum.
@@ -395,7 +403,7 @@ func TestBeginObject(t *testing.T) {
 				IsChecksumComposite:           true,
 				EncryptedChecksum:             testrand.Bytes(4),
 			})
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumsUnsupported, "Checksum options may not be provided at this time")
+			rpctest.RequireStatus(t, err, rpcstatus.ChecksumsUnsupported, checksumsDisabledErrMsg)
 
 			requireNoPendingObjects(ctx, t, bucketName, objectKey)
 		})
@@ -420,14 +428,14 @@ func TestCommitObject(t *testing.T) {
 
 		encParams := metabasetest.DefaultEncryption
 
-		requireNoCommittedObjects := func(t *testing.T, bucketName string) {
+		requireNoCommittedObjects := func(t *testing.T, bucketName string, msgAndArgs ...any) {
 			list, err := db.ListObjects(ctx, metabase.ListObjects{
 				ProjectID:  projectID,
 				BucketName: metabase.BucketName(bucketName),
 			})
-			require.NoError(t, err)
-			require.Empty(t, list.Objects)
-			require.False(t, list.More)
+			require.NoError(t, err, msgAndArgs)
+			require.Empty(t, list.Objects, msgAndArgs)
+			require.False(t, list.More, msgAndArgs)
 		}
 
 		t.Run("Basic", func(t *testing.T) {
@@ -758,41 +766,24 @@ func TestCommitObject(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			validReq := pb.CommitObjectRequest{
+			baseReq := pb.CommitObjectRequest{
 				Header:                        &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
 				StreamId:                      beginResp.StreamId,
 				EncryptedMetadata:             userData.EncryptedMetadata,
 				EncryptedMetadataNonce:        pb.Nonce(userData.EncryptedMetadataNonce),
 				EncryptedMetadataEncryptedKey: userData.EncryptedMetadataEncryptedKey,
-				ChecksumAlgorithm:             pb.ObjectChecksumAlgorithm(userData.Checksum.Algorithm),
-				IsChecksumComposite:           userData.Checksum.IsComposite,
-				EncryptedChecksum:             userData.Checksum.EncryptedValue,
 			}
 
-			req := validReq
-			req.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_SHA256 + 1
-			_, err = endpoint.CommitObject(ctx, &req)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumAlgorithmInvalid, "The checksum algorithm is invalid")
-			requireNoCommittedObjects(t, bucketName)
+			for _, scenario := range invalidChecksumOptionsScenarios {
+				req := baseReq
+				req.ChecksumAlgorithm = scenario.checksumAlgorithm
+				req.IsChecksumComposite = scenario.isChecksumComposite
+				req.EncryptedChecksum = scenario.encryptedChecksum
 
-			req = validReq
-			req.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_NONE
-			_, err = endpoint.CommitObject(ctx, &req)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumTypeUnexpected, "A checksum type must not be provided if a checksum algorithm is not provided")
-			requireNoCommittedObjects(t, bucketName)
-
-			req = validReq
-			req.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_NONE
-			req.IsChecksumComposite = false
-			_, err = endpoint.CommitObject(ctx, &req)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumUnexpected, "A checksum must not be provided if a checksum algorithm is not provided")
-			requireNoCommittedObjects(t, bucketName)
-
-			req = validReq
-			req.EncryptedChecksum = nil
-			_, err = endpoint.CommitObject(ctx, &req)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumMissing, "A checksum must be provided if a checksum algorithm is provided")
-			requireNoCommittedObjects(t, bucketName)
+				_, err = endpoint.CommitObject(ctx, &req)
+				requireRPCStatus(t, err, scenario.statusCode, scenario.errMsg, scenario.name)
+				requireNoCommittedObjects(t, bucketName, scenario.name)
+			}
 
 			// Ensure that omitting metadata, thereby indicating that the pending object's metadata should be committed,
 			// results in an error because the pending object's metadata has incomplete checksum information.
@@ -841,7 +832,7 @@ func TestCommitObject(t *testing.T) {
 				IsChecksumComposite:           userData.Checksum.IsComposite,
 				EncryptedChecksum:             userData.Checksum.EncryptedValue,
 			})
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumsUnsupported, "Checksum options may not be provided at this time")
+			rpctest.RequireStatus(t, err, rpcstatus.ChecksumsUnsupported, checksumsDisabledErrMsg)
 
 			requireNoCommittedObjects(t, bucketName)
 		})
@@ -866,14 +857,14 @@ func TestCommitInlineObject(t *testing.T) {
 
 		encParams := metabasetest.DefaultEncryption
 
-		requireNoCommittedObjects := func(t *testing.T, bucketName string) {
+		requireNoCommittedObjects := func(t *testing.T, bucketName string, msgAndArgs ...any) {
 			list, err := db.ListObjects(ctx, metabase.ListObjects{
 				ProjectID:  projectID,
 				BucketName: metabase.BucketName(bucketName),
 			})
-			require.NoError(t, err)
-			require.Empty(t, list.Objects)
-			require.False(t, list.More)
+			require.NoError(t, err, msgAndArgs)
+			require.Empty(t, list.Objects, msgAndArgs)
+			require.False(t, list.More, msgAndArgs)
 		}
 
 		header := &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()}
@@ -1016,7 +1007,6 @@ func TestCommitInlineObject(t *testing.T) {
 
 			userData, err := randEncryptedUserDataWithChecksum(encParams, 0)
 			require.NoError(t, err)
-			userData.Checksum.IsComposite = true
 
 			beginReq := &pb.BeginObjectRequest{
 				Header:             header,
@@ -1037,41 +1027,23 @@ func TestCommitInlineObject(t *testing.T) {
 				EncryptedInlineData: testrand.Bytes(32),
 			}
 
-			validCommitReq := pb.CommitObjectRequest{
+			baseCommitReq := pb.CommitObjectRequest{
 				Header:                        header,
 				EncryptedMetadata:             userData.EncryptedMetadata,
 				EncryptedMetadataEncryptedKey: userData.EncryptedMetadataEncryptedKey,
 				EncryptedMetadataNonce:        pb.Nonce(userData.EncryptedMetadataNonce),
-				EncryptedEtag:                 userData.EncryptedETag,
-				ChecksumAlgorithm:             pb.ObjectChecksumAlgorithm(userData.Checksum.Algorithm),
-				IsChecksumComposite:           userData.Checksum.IsComposite,
-				EncryptedChecksum:             userData.Checksum.EncryptedValue,
 			}
 
-			commitReq := validCommitReq
-			commitReq.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_SHA256 + 1
-			_, _, _, err = endpoint.CommitInlineObject(ctx, beginReq, makeSegmentReq, &commitReq)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumAlgorithmInvalid, "The checksum algorithm is invalid")
-			requireNoCommittedObjects(t, bucketName)
+			for _, scenario := range invalidChecksumOptionsScenarios {
+				commitReq := baseCommitReq
+				commitReq.ChecksumAlgorithm = scenario.checksumAlgorithm
+				commitReq.IsChecksumComposite = scenario.isChecksumComposite
+				commitReq.EncryptedChecksum = scenario.encryptedChecksum
 
-			commitReq = validCommitReq
-			commitReq.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_NONE
-			_, _, _, err = endpoint.CommitInlineObject(ctx, beginReq, makeSegmentReq, &commitReq)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumTypeUnexpected, "A checksum type must not be provided if a checksum algorithm is not provided")
-			requireNoCommittedObjects(t, bucketName)
-
-			commitReq = validCommitReq
-			commitReq.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm_NONE
-			commitReq.IsChecksumComposite = false
-			_, _, _, err = endpoint.CommitInlineObject(ctx, beginReq, makeSegmentReq, &commitReq)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumUnexpected, "A checksum must not be provided if a checksum algorithm is not provided")
-			requireNoCommittedObjects(t, bucketName)
-
-			commitReq = validCommitReq
-			commitReq.EncryptedChecksum = nil
-			_, _, _, err = endpoint.CommitInlineObject(ctx, beginReq, makeSegmentReq, &commitReq)
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumMissing, "A checksum must be provided if a checksum algorithm is provided")
-			requireNoCommittedObjects(t, bucketName)
+				_, _, _, err = endpoint.CommitInlineObject(ctx, beginReq, makeSegmentReq, &commitReq)
+				requireRPCStatus(t, err, scenario.statusCode, scenario.errMsg, scenario.name)
+				requireNoCommittedObjects(t, bucketName, scenario.name)
+			}
 		})
 
 		t.Run("Checksums disabled", func(t *testing.T) {
@@ -1111,7 +1083,7 @@ func TestCommitInlineObject(t *testing.T) {
 				IsChecksumComposite:           userData.Checksum.IsComposite,
 				EncryptedChecksum:             userData.Checksum.EncryptedValue,
 			})
-			rpctest.RequireStatus(t, err, rpcstatus.ChecksumsUnsupported, "Checksum options may not be provided at this time")
+			rpctest.RequireStatus(t, err, rpcstatus.ChecksumsUnsupported, checksumsDisabledErrMsg)
 
 			requireNoCommittedObjects(t, bucketName)
 		})
@@ -1308,77 +1280,6 @@ func TestEndpoint_Object_No_StorageNodes(t *testing.T) {
 				require.Equal(t, item.Path, listItems[i].Key)
 				require.Equal(t, item.IsPrefix, listItems[i].IsPrefix)
 			}
-		})
-
-		t.Run("update metadata", func(t *testing.T) {
-			defer ctx.Check(deleteBucket)
-
-			// upload a small inline object
-			err := up.Upload(ctx, satellite, bucketName, "testobject", testrand.Bytes(1*memory.KiB))
-			require.NoError(t, err)
-
-			objects, err := satellite.API.Metainfo.Metabase.TestingAllObjects(ctx)
-			require.NoError(t, err)
-			require.Len(t, objects, 1)
-
-			getResp, err := satellite.API.Metainfo.Endpoint.GetObject(ctx, &pb.ObjectGetRequest{
-				Header: &pb.RequestHeader{
-					ApiKey: apiKey.SerializeRaw(),
-				},
-				Bucket:             []byte("testbucket"),
-				EncryptedObjectKey: []byte(objects[0].ObjectKey),
-			})
-			require.NoError(t, err)
-
-			encryptedUserData := metabasetest.RandEncryptedUserData()
-			metadata, err := pb.Marshal(&pb.StreamMeta{
-				NumberOfSegments:    1,
-				EncryptionBlockSize: int32(getResp.Object.EncryptionParameters.BlockSize),
-				EncryptionType:      int32(getResp.Object.EncryptionParameters.CipherSuite),
-				LastSegmentMeta: &pb.SegmentMeta{
-					EncryptedKey: encryptedUserData.EncryptedMetadata,
-					KeyNonce:     encryptedUserData.EncryptedMetadataNonce,
-				},
-			})
-			require.NoError(t, err)
-			encryptedUserData.EncryptedMetadata = metadata
-
-			// update the object metadata
-			_, err = satellite.API.Metainfo.Endpoint.UpdateObjectMetadata(ctx, &pb.ObjectUpdateMetadataRequest{
-				Header: &pb.RequestHeader{
-					ApiKey: apiKey.SerializeRaw(),
-				},
-				Bucket:                        getResp.Object.Bucket,
-				EncryptedObjectKey:            getResp.Object.EncryptedObjectKey,
-				StreamId:                      getResp.Object.StreamId,
-				EncryptedMetadataNonce:        pb.Nonce(encryptedUserData.EncryptedMetadataNonce),
-				EncryptedMetadata:             encryptedUserData.EncryptedMetadata,
-				EncryptedMetadataEncryptedKey: encryptedUserData.EncryptedMetadataEncryptedKey,
-				EncryptedEtag:                 encryptedUserData.EncryptedETag,
-				SetEncryptedEtag:              true,
-			})
-			require.NoError(t, err)
-
-			// assert the metadata has been updated
-			objects, err = satellite.API.Metainfo.Metabase.TestingAllObjects(ctx)
-			require.NoError(t, err)
-			require.Len(t, objects, 1)
-			assert.Equal(t, encryptedUserData, objects[0].EncryptedUserData)
-
-			// ensure we get that information from get object as well
-			resp, err := satellite.API.Metainfo.Endpoint.GetObject(ctx, &pb.ObjectGetRequest{
-				Header: &pb.RequestHeader{
-					ApiKey: apiKey.SerializeRaw(),
-				},
-				Bucket:             getResp.Object.Bucket,
-				EncryptedObjectKey: getResp.Object.EncryptedObjectKey,
-			})
-			require.NoError(t, err)
-
-			require.Equal(t, encryptedUserData.EncryptedMetadata, resp.Object.EncryptedMetadata)
-			require.Equal(t, encryptedUserData.EncryptedMetadataEncryptedKey, resp.Object.EncryptedMetadataEncryptedKey)
-			require.Equal(t, encryptedUserData.EncryptedETag, resp.Object.EncryptedEtag)
-			require.Equal(t, encryptedUserData.EncryptedMetadataNonce, resp.Object.EncryptedMetadataNonce.Bytes())
 		})
 
 		t.Run("check delete rights on upload", func(t *testing.T) {
@@ -3436,6 +3337,458 @@ func TestEndpoint_CopyObject(t *testing.T) {
 	})
 }
 
+func TestUpdateObjectMetadata(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Metainfo.ChecksumsEnabled = true
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		up := planet.Uplinks[0]
+		endpoint := sat.Metainfo.Endpoint
+		db := sat.Metabase.DB
+		apiKey := up.APIKey[sat.ID()]
+		projectID := up.Projects[0].ID
+
+		getMetadata := func(ctx context.Context, objStream metabase.ObjectStream) (metabase.EncryptedUserData, error) {
+			object, err := db.GetObjectExactVersion(ctx, metabase.GetObjectExactVersion{
+				ObjectLocation: objStream.Location(),
+				Version:        objStream.Version,
+			})
+			if err != nil {
+				return metabase.EncryptedUserData{}, err
+			}
+			return object.EncryptedUserData, nil
+		}
+
+		getStreamID := func(ctx context.Context, objStream metabase.ObjectStream) ([]byte, error) {
+			resp, err := endpoint.GetObject(ctx, &pb.GetObjectRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+			})
+			if err != nil {
+				return nil, err
+			}
+			return resp.Object.StreamId, nil
+		}
+
+		t.Run("Basic", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			objStream := randObjectStream(projectID, bucketName)
+			metabasetest.CreateObject(ctx, t, db, objStream, 0)
+
+			streamID, err := getStreamID(ctx, objStream)
+			require.NoError(t, err)
+
+			userData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 0)
+			require.NoError(t, err)
+
+			req := &pb.UpdateObjectMetadataRequest{
+				Header:                        &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:                        []byte(objStream.BucketName),
+				EncryptedObjectKey:            []byte(objStream.ObjectKey),
+				StreamId:                      streamID,
+				EncryptedMetadataEncryptedKey: userData.EncryptedMetadataEncryptedKey,
+				EncryptedMetadataNonce:        pb.Nonce(userData.EncryptedMetadataNonce),
+				EncryptedMetadata:             userData.EncryptedMetadata,
+				EncryptedEtag:                 userData.EncryptedETag,
+				ChecksumAlgorithm:             pb.ObjectChecksumAlgorithm(userData.Checksum.Algorithm),
+				IsChecksumComposite:           userData.Checksum.IsComposite,
+				EncryptedChecksum:             userData.Checksum.EncryptedValue,
+			}
+
+			// Confirm that the metadata encryption key, encryption nonce, and custom metadata are set.
+			_, err = endpoint.UpdateObjectMetadata(ctx, req)
+			require.NoError(t, err)
+
+			metadata, err := getMetadata(ctx, objStream)
+			require.NoError(t, err)
+
+			expectedMetadata := metabase.EncryptedUserData{
+				EncryptedMetadataEncryptedKey: userData.EncryptedMetadataEncryptedKey,
+				EncryptedMetadataNonce:        userData.EncryptedMetadataNonce,
+				EncryptedMetadata:             userData.EncryptedMetadata,
+			}
+			require.Equal(t, expectedMetadata, metadata)
+
+			// Confirm that the metadata encryption key, encryption nonce, and custom metadata are also
+			// set if Includes is set appropriately.
+			req.Includes = &pb.ObjectMetadataIncludes{
+				Custom: true,
+			}
+
+			userData, err = randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 0)
+			require.NoError(t, err)
+
+			req.EncryptedMetadataEncryptedKey = userData.EncryptedMetadataEncryptedKey
+			req.EncryptedMetadataNonce = pb.Nonce(userData.EncryptedMetadataNonce)
+			req.EncryptedMetadata = userData.EncryptedMetadata
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, req)
+			require.NoError(t, err)
+
+			metadata, err = getMetadata(ctx, objStream)
+			require.NoError(t, err)
+
+			expectedMetadata = metabase.EncryptedUserData{
+				EncryptedMetadataEncryptedKey: req.EncryptedMetadataEncryptedKey,
+				EncryptedMetadataNonce:        req.EncryptedMetadataNonce.Bytes(),
+				EncryptedMetadata:             req.EncryptedMetadata,
+			}
+			require.Equal(t, expectedMetadata, metadata)
+
+			// Confirm that the ETag is set if SetEncryptedEtag is set.
+			req.Includes = nil
+			req.SetEncryptedEtag = true
+			expectedMetadata.EncryptedETag = req.EncryptedEtag
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, req)
+			require.NoError(t, err)
+
+			metadata, err = getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Equal(t, expectedMetadata, metadata)
+
+			// Confirm that the ETag is also set if Includes is set appropriately.
+			req.SetEncryptedEtag = false
+			req.Includes = &pb.ObjectMetadataIncludes{
+				Custom: true,
+				Etag:   true,
+			}
+			req.EncryptedEtag = testrand.Bytes(16)
+			expectedMetadata.EncryptedETag = req.EncryptedEtag
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, req)
+			require.NoError(t, err)
+
+			metadata, err = getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Equal(t, expectedMetadata, metadata)
+
+			// Confirm that checksum information is set if Includes is set appropriately.
+			req.Includes.Checksum = true
+			expectedMetadata.Checksum = metabase.Checksum{
+				Algorithm:      storj.ObjectChecksumAlgorithm(req.ChecksumAlgorithm),
+				IsComposite:    req.IsChecksumComposite,
+				EncryptedValue: req.EncryptedChecksum,
+			}
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, req)
+			require.NoError(t, err)
+
+			metadata, err = getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Equal(t, expectedMetadata, metadata)
+		})
+
+		t.Run("Invalid includes", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			objStream := randObjectStream(projectID, bucketName)
+			metabasetest.CreateObject(ctx, t, db, objStream, 0)
+
+			streamID, err := getStreamID(ctx, objStream)
+			require.NoError(t, err)
+
+			userData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 0)
+			require.NoError(t, err)
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, &pb.UpdateObjectMetadataRequest{
+				Header:                        &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:                        []byte(objStream.BucketName),
+				EncryptedObjectKey:            []byte(objStream.ObjectKey),
+				StreamId:                      streamID,
+				Includes:                      &pb.ObjectMetadataIncludes{},
+				EncryptedMetadataEncryptedKey: userData.EncryptedMetadataEncryptedKey,
+				EncryptedMetadataNonce:        pb.Nonce(userData.EncryptedMetadataNonce),
+				EncryptedMetadata:             userData.EncryptedMetadata,
+			})
+			rpctest.RequireStatus(t, err, rpcstatus.ObjectMetadataIncludesInvalid, "Includes must not be empty")
+		})
+
+		t.Run("Disallow accidental dismissal of metadata fields", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			includeAllExcept := func(includes pb.ObjectMetadataIncludes) pb.ObjectMetadataIncludes {
+				return pb.ObjectMetadataIncludes{
+					Custom:   !includes.Checksum,
+					Etag:     !includes.Etag,
+					Checksum: !includes.Checksum,
+				}
+			}
+
+			for _, tt := range []struct {
+				name     string
+				userData metabase.EncryptedUserData
+				includes pb.ObjectMetadataIncludes
+			}{
+				{
+					name: "Object has custom metadata",
+					userData: func() metabase.EncryptedUserData {
+						userData, err := randEncryptedUserData(metabasetest.DefaultEncryption, 4)
+						require.NoError(t, err)
+						userData.EncryptedETag = nil
+						return userData
+					}(),
+					includes: includeAllExcept(pb.ObjectMetadataIncludes{
+						Custom: true,
+					}),
+				},
+				{
+					name: "Object has ETag",
+					userData: metabase.EncryptedUserData{
+						EncryptedMetadataNonce:        testrand.Nonce().Bytes(),
+						EncryptedMetadataEncryptedKey: testrand.Bytes(48),
+						EncryptedETag:                 testrand.Bytes(32),
+					},
+					includes: includeAllExcept(pb.ObjectMetadataIncludes{
+						Etag: true,
+					}),
+				},
+				{
+					name: "Object has checksum",
+					userData: metabase.EncryptedUserData{
+						EncryptedMetadataNonce:        testrand.Nonce().Bytes(),
+						EncryptedMetadataEncryptedKey: testrand.Bytes(48),
+						Checksum:                      metabasetest.RandEncryptedUserDataWithChecksum().Checksum,
+					},
+					includes: includeAllExcept(pb.ObjectMetadataIncludes{
+						Checksum: true,
+					}),
+				},
+			} {
+				objStream := randObjectStream(projectID, bucketName)
+
+				metabasetest.CreateTestObject{
+					CommitObject: &metabase.CommitObject{
+						ObjectStream:         objStream,
+						Encryption:           metabasetest.DefaultEncryption,
+						SetEncryptedMetadata: true,
+						EncryptedUserData:    tt.userData,
+					},
+				}.Run(ctx, t, db, objStream, 0)
+
+				streamID, err := getStreamID(ctx, objStream)
+				require.NoError(t, err, tt.name)
+
+				_, err = endpoint.UpdateObjectMetadata(ctx, &pb.UpdateObjectMetadataRequest{
+					Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+					Bucket:             []byte(objStream.BucketName),
+					EncryptedObjectKey: []byte(objStream.ObjectKey),
+					StreamId:           streamID,
+					Includes:           &tt.includes,
+				})
+				requireRPCStatus(t, err, rpcstatus.InsufficientObjectMetadataIncludes,
+					"insufficient metadata includes: the object's metadata contains populated fields not included in the provided includes")
+
+				metadata, err := getMetadata(ctx, objStream)
+				require.NoError(t, err, tt.name)
+				require.Equal(t, tt.userData, metadata, tt.name)
+			}
+		})
+
+		t.Run("Disallow accidental dismissal of metadata fields (legacy)", func(t *testing.T) {
+			// As a special case for legacy uplinks, if Includes isn't set, then we return a different error.
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			objStream := randObjectStream(projectID, bucketName)
+
+			userData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 0)
+			require.NoError(t, err)
+
+			metabasetest.CreateTestObject{
+				CommitObject: &metabase.CommitObject{
+					ObjectStream:         objStream,
+					Encryption:           metabasetest.DefaultEncryption,
+					SetEncryptedMetadata: true,
+					EncryptedUserData:    userData,
+				},
+			}.Run(ctx, t, db, objStream, 0)
+
+			streamID, err := getStreamID(ctx, objStream)
+			require.NoError(t, err)
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, &pb.UpdateObjectMetadataRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+				StreamId:           streamID,
+				Includes:           nil,
+			})
+			rpctest.RequireStatusContains(t, err, rpcstatus.NotFound, "object not found:")
+
+			actualUserData, err := getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Equal(t, userData, actualUserData)
+		})
+
+		t.Run("Invalid checksum options", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			objStream := randObjectStream(projectID, bucketName)
+			metabasetest.CreateObject(ctx, t, db, objStream, 0)
+
+			streamID, err := getStreamID(ctx, objStream)
+			require.NoError(t, err)
+
+			baseReq := pb.UpdateObjectMetadataRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+				StreamId:           streamID,
+				Includes: &pb.ObjectMetadataIncludes{
+					Custom: true,
+				},
+			}
+
+			for _, scenario := range invalidChecksumOptionsScenarios {
+				req := baseReq
+				req.ChecksumAlgorithm = scenario.checksumAlgorithm
+				req.IsChecksumComposite = scenario.isChecksumComposite
+				req.EncryptedChecksum = scenario.encryptedChecksum
+
+				_, err = endpoint.UpdateObjectMetadata(ctx, &req)
+				requireRPCStatus(t, err, scenario.statusCode, scenario.errMsg, scenario.name)
+
+				metadata, err := getMetadata(ctx, objStream)
+				require.NoError(t, err, scenario.name)
+				require.Zero(t, metadata, scenario.name)
+			}
+		})
+
+		t.Run("Checksums disabled", func(t *testing.T) {
+			endpoint.TestingSetChecksumsEnabled(false)
+			defer endpoint.TestingSetChecksumsEnabled(true)
+
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			objStream := randObjectStream(projectID, bucketName)
+			metabasetest.CreateObject(ctx, t, db, objStream, 0)
+
+			streamID, err := getStreamID(ctx, objStream)
+			require.NoError(t, err)
+
+			userData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 4)
+			require.NoError(t, err)
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, &pb.UpdateObjectMetadataRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+				StreamId:           streamID,
+				Includes: &pb.ObjectMetadataIncludes{
+					Custom: true,
+				},
+				ChecksumAlgorithm:   pb.ObjectChecksumAlgorithm(userData.Checksum.Algorithm),
+				IsChecksumComposite: userData.Checksum.IsComposite,
+				EncryptedChecksum:   userData.Checksum.EncryptedValue,
+			})
+			requireRPCStatus(t, err, rpcstatus.ChecksumsUnsupported, checksumsDisabledErrMsg)
+
+			metadata, err := getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Zero(t, metadata)
+		})
+
+		t.Run("Metadata too large", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			objStream := randObjectStream(projectID, bucketName)
+			metabasetest.CreateObject(ctx, t, db, objStream, 0)
+
+			streamID, err := getStreamID(ctx, objStream)
+			require.NoError(t, err)
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, &pb.ObjectUpdateMetadataRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+				StreamId:           streamID,
+
+				EncryptedMetadata:             testrand.Bytes(sat.Config.Metainfo.MaxMetadataSize + 1),
+				EncryptedMetadataEncryptedKey: randomEncryptedKey,
+				EncryptedMetadataNonce:        testrand.Nonce(),
+			})
+			require.True(t, errs2.IsRPC(err, rpcstatus.InvalidArgument))
+
+			metadata, err := getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Zero(t, metadata)
+		})
+
+		t.Run("Invalid encrypted metadata key", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			objStream := randObjectStream(projectID, bucketName)
+			metabasetest.CreateObject(ctx, t, db, objStream, 0)
+
+			streamID, err := getStreamID(ctx, objStream)
+			require.NoError(t, err)
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, &pb.ObjectUpdateMetadataRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+				StreamId:           streamID,
+
+				EncryptedMetadata:             testrand.Bytes(sat.Config.Metainfo.MaxMetadataSize),
+				EncryptedMetadataEncryptedKey: randomEncryptedKey[:len(randomEncryptedKey)-1],
+				EncryptedMetadataNonce:        testrand.Nonce(),
+			})
+			require.True(t, errs2.IsRPC(err, rpcstatus.InvalidArgument))
+
+			metadata, err := getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Zero(t, metadata)
+		})
+
+		t.Run("Delete marker", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			_, err := sat.DB.Buckets().CreateBucket(ctx, buckets.Bucket{
+				Name:       bucketName,
+				ProjectID:  projectID,
+				Versioning: buckets.VersioningEnabled,
+			})
+			require.NoError(t, err)
+
+			objStream := randObjectStream(projectID, bucketName)
+			metabasetest.CreateObject(ctx, t, db, objStream, 0)
+
+			deleteResp, err := endpoint.BeginDeleteObject(ctx, &pb.BeginDeleteObjectRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+			})
+			require.NoError(t, err)
+			require.Equal(t, pb.Object_DELETE_MARKER_VERSIONED, deleteResp.Object.Status)
+
+			_, err = endpoint.UpdateObjectMetadata(ctx, &pb.UpdateObjectMetadataRequest{
+				Header:             &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				Bucket:             []byte(objStream.BucketName),
+				EncryptedObjectKey: []byte(objStream.ObjectKey),
+				StreamId:           deleteResp.Object.StreamId,
+			})
+			rpctest.RequireStatusContains(t, err, rpcstatus.NotFound, "object not found:")
+
+			metadata, err := getMetadata(ctx, objStream)
+			require.NoError(t, err)
+			require.Zero(t, metadata)
+		})
+	})
+}
 func TestEndpoint_UpdateObjectMetadata(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 1,
@@ -8627,4 +8980,54 @@ func randEncryptedUserDataWithChecksum(encryption storj.EncryptionParameters, se
 	}
 	encryptedUserData.EncryptedMetadata = metadata
 	return encryptedUserData, nil
+}
+
+var invalidChecksumOptionsScenarios = []struct {
+	name                string
+	errMsg              string
+	statusCode          rpcstatus.StatusCode
+	checksumAlgorithm   pb.ObjectChecksumAlgorithm
+	isChecksumComposite bool
+	encryptedChecksum   []byte
+}{
+	{
+		name:                "Checksum algorithm above maximum",
+		errMsg:              "The checksum algorithm is invalid",
+		statusCode:          rpcstatus.ChecksumAlgorithmInvalid,
+		checksumAlgorithm:   pb.ObjectChecksumAlgorithm_SHA256 + 1,
+		isChecksumComposite: false,
+		encryptedChecksum:   []byte{1, 2, 3, 4},
+	},
+	{
+		name:                "Checksum algorithm below minimum",
+		errMsg:              "The checksum algorithm is invalid",
+		statusCode:          rpcstatus.ChecksumAlgorithmInvalid,
+		checksumAlgorithm:   pb.ObjectChecksumAlgorithm_NONE - 1,
+		isChecksumComposite: false,
+		encryptedChecksum:   []byte{1, 2, 3, 4},
+	},
+	{
+		name:                "Checksum type without checksum algorithm",
+		errMsg:              "A checksum type must not be provided if a checksum algorithm is not provided",
+		statusCode:          rpcstatus.ChecksumTypeUnexpected,
+		checksumAlgorithm:   pb.ObjectChecksumAlgorithm_NONE,
+		isChecksumComposite: true,
+		encryptedChecksum:   []byte{1, 2, 3, 4},
+	},
+	{
+		name:                "Checksum without algorithm",
+		errMsg:              "A checksum must not be provided if a checksum algorithm is not provided",
+		statusCode:          rpcstatus.ChecksumUnexpected,
+		checksumAlgorithm:   pb.ObjectChecksumAlgorithm_NONE,
+		isChecksumComposite: false,
+		encryptedChecksum:   []byte{1, 2, 3, 4},
+	},
+	{
+		name:                "Checksum algorithm without checksum",
+		errMsg:              "A checksum must be provided if a checksum algorithm is provided",
+		statusCode:          rpcstatus.ChecksumMissing,
+		checksumAlgorithm:   pb.ObjectChecksumAlgorithm_CRC32,
+		isChecksumComposite: false,
+		encryptedChecksum:   nil,
+	},
 }
