@@ -47,18 +47,10 @@ type VerifyEncryptedUserData struct {
 
 // Verify checks whether the fields have been set correctly.
 func (userData EncryptedUserData) Verify(opts VerifyEncryptedUserData) error {
-	if (userData.EncryptedMetadataNonce == nil) != (userData.EncryptedMetadataEncryptedKey == nil) {
-		return ErrInvalidRequest.New("EncryptedMetadataNonce and EncryptedMetadataEncryptedKey must always be set together")
-	}
-
 	hasEncryptedData := userData.EncryptedMetadata != nil || userData.EncryptedETag != nil || userData.Checksum.EncryptedValue != nil
-	hasEncryptionKey := userData.EncryptedMetadataNonce != nil && userData.EncryptedMetadataEncryptedKey != nil
-
-	switch {
-	case hasEncryptedData && !hasEncryptionKey:
-		return ErrInvalidRequest.New("EncryptedMetadataNonce and EncryptedMetadataEncryptedKey must be set when EncryptedMetadata, EncryptedETag, or Checksum.EncryptedValue are set")
-	case !hasEncryptedData && hasEncryptionKey:
-		return ErrInvalidRequest.New("EncryptedMetadataNonce and EncryptedMetadataEncryptedKey must be empty when EncryptedMetadata, EncryptedETag, and Checksum.EncryptedValue are empty")
+	err := verifyUserDataEncryptionParams(userData.EncryptedMetadataEncryptedKey, userData.EncryptedMetadataNonce, hasEncryptedData)
+	if err != nil {
+		return err
 	}
 
 	hasChecksumAlgo := userData.Checksum.Algorithm != storj.ObjectChecksumAlgorithmNone
@@ -76,6 +68,23 @@ func (userData EncryptedUserData) Verify(opts VerifyEncryptedUserData) error {
 
 	if userData.Checksum.EncryptedValue == nil && hasChecksumAlgo && !opts.AllowEmptyChecksumValue {
 		return ErrInvalidRequest.New("Checksum.EncryptedValue must be set if Checksum.Algorithm is set")
+	}
+
+	return nil
+}
+
+func verifyUserDataEncryptionParams(encryptedMetadataEncryptedKey, encryptedMetadataNonce []byte, hasEncryptedData bool) error {
+	if (encryptedMetadataNonce == nil) != (encryptedMetadataEncryptedKey == nil) {
+		return ErrInvalidRequest.New("EncryptedMetadataNonce and EncryptedMetadataEncryptedKey must always be set together")
+	}
+
+	hasEncryptionParams := encryptedMetadataNonce != nil && encryptedMetadataEncryptedKey != nil
+
+	switch {
+	case hasEncryptedData && !hasEncryptionParams:
+		return ErrInvalidRequest.New("EncryptedMetadataNonce and EncryptedMetadataEncryptedKey must be set when EncryptedMetadata, EncryptedETag, or Checksum.EncryptedValue are set")
+	case !hasEncryptedData && hasEncryptionParams:
+		return ErrInvalidRequest.New("EncryptedMetadataNonce and EncryptedMetadataEncryptedKey must be empty when EncryptedMetadata, EncryptedETag, and Checksum.EncryptedValue are empty")
 	}
 
 	return nil
