@@ -2976,6 +2976,9 @@ func TestEndpoint_CopyObject(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 0, UplinkCount: 4,
 		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
+				config.Metainfo.ChecksumsEnabled = true
+			},
 			Uplink: func(log *zap.Logger, index int, config *testplanet.UplinkConfig) {
 				config.DefaultPathCipher = storj.EncNull
 			},
@@ -2993,7 +2996,7 @@ func TestEndpoint_CopyObject(t *testing.T) {
 
 		requireCreateObject := func(t *testing.T, bucketName string) (metabase.Object, []metabase.Segment) {
 			objStream := randObjectStream(up.Projects[0].ID, bucketName)
-			userData, err := randEncryptedUserData(metabasetest.DefaultEncryption, 1)
+			userData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 1)
 			require.NoError(t, err)
 
 			object, segments := metabasetest.CreateTestObject{
@@ -3095,6 +3098,7 @@ func TestEndpoint_CopyObject(t *testing.T) {
 
 			assert.Equal(t, object.EncryptedMetadataEncryptedKey, beginResp.EncryptedMetadataKey)
 			assert.Equal(t, object.EncryptedMetadataNonce, beginResp.EncryptedMetadataKeyNonce.Bytes())
+			assert.EqualValues(t, object.Checksum.Algorithm, beginResp.ChecksumAlgorithm)
 		})
 
 		t.Run("FinishCopyObject - Metadata too large", func(t *testing.T) {
@@ -3172,6 +3176,46 @@ func TestEndpoint_CopyObject(t *testing.T) {
 			require.True(t, errs2.IsRPC(err, rpcstatus.InvalidArgument))
 		})
 
+		t.Run("FinishCopyObject - Invalid checksum options", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			object, segments := requireCreateObject(t, bucketName)
+			streamID := requireGetStreamID(t, object.ObjectStream)
+
+			newObjectKey := metabasetest.RandObjectKey()
+			requireBeginCopyObject(t, bucketName, string(object.ObjectKey), bucketName, string(newObjectKey))
+
+			baseReq := pb.FinishCopyObjectRequest{
+				Header:                       &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				StreamId:                     streamID,
+				NewBucket:                    []byte(bucketName),
+				NewEncryptedObjectKey:        []byte(newObjectKey),
+				NewEncryptedMetadataKeyNonce: testrand.Nonce(),
+				NewEncryptedMetadataKey:      testrand.Bytes(48),
+				NewSegmentKeys:               randNewSegmentKeys(segments),
+			}
+
+			for _, scenario := range invalidChecksumOptionsScenarios {
+				req := baseReq
+				req.NewChecksumAlgorithm = scenario.checksumAlgorithm
+				req.NewIsChecksumComposite = scenario.isChecksumComposite
+				req.NewEncryptedChecksum = scenario.encryptedChecksum
+
+				_, err := endpoint.FinishCopyObject(ctx, &req)
+				requireRPCStatus(t, err, scenario.statusCode, scenario.errMsg, scenario.name)
+
+				_, err = db.GetObjectLastCommitted(ctx, metabase.GetObjectLastCommitted{
+					ObjectLocation: metabase.ObjectLocation{
+						ProjectID:  object.ProjectID,
+						BucketName: metabase.BucketName(bucketName),
+						ObjectKey:  newObjectKey,
+					},
+				})
+				require.ErrorIs(t, err, metabase.ErrObjectNotFound.Instance())
+			}
+		})
+
 		t.Run("FinishCopyObject - Success", func(t *testing.T) {
 			bucketName := testrand.BucketName()
 			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
@@ -3214,6 +3258,112 @@ func TestEndpoint_CopyObject(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.Equal(t, segment.InlineData, segmentCopy.InlineData)
+		})
+
+		t.Run("FinishCopyObject - Override metadata", func(t *testing.T) {
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			object, segments := requireCreateObject(t, bucketName)
+			streamID := requireGetStreamID(t, object.ObjectStream)
+
+			newObjectKey := metabasetest.RandObjectKey()
+			requireBeginCopyObject(t, bucketName, string(object.ObjectKey), bucketName, string(newObjectKey))
+
+			copyUserData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 1)
+			require.NoError(t, err)
+
+			req := &pb.ObjectFinishCopyRequest{
+				Header: &pb.RequestHeader{
+					ApiKey: apiKey.SerializeRaw(),
+				},
+				StreamId:                     streamID,
+				NewBucket:                    []byte(bucketName),
+				NewEncryptedObjectKey:        []byte(newObjectKey),
+				NewSegmentKeys:               randNewSegmentKeys(segments),
+				NewEncryptedMetadataKeyNonce: pb.Nonce(copyUserData.EncryptedMetadataNonce),
+				NewEncryptedMetadataKey:      copyUserData.EncryptedMetadataEncryptedKey,
+				NewEncryptedMetadata:         copyUserData.EncryptedMetadata,
+				NewEncryptedEtag:             copyUserData.EncryptedETag,
+				NewChecksumAlgorithm:         pb.ObjectChecksumAlgorithm(copyUserData.Checksum.Algorithm),
+				NewIsChecksumComposite:       copyUserData.Checksum.IsComposite,
+				NewEncryptedChecksum:         copyUserData.Checksum.EncryptedValue,
+				OverrideMetadata:             false,
+			}
+
+			// Confirm that metadata is not overridden if OverrideMetadata is false.
+			_, err = endpoint.FinishCopyObject(ctx, req)
+			require.NoError(t, err)
+
+			objectCopy, err := db.GetObjectLastCommitted(ctx, metabase.GetObjectLastCommitted{
+				ObjectLocation: metabase.ObjectLocation{
+					ProjectID:  object.ProjectID,
+					BucketName: metabase.BucketName(bucketName),
+					ObjectKey:  newObjectKey,
+				},
+			})
+			require.NoError(t, err)
+
+			expectedUserData := object.EncryptedUserData
+			expectedUserData.EncryptedMetadataEncryptedKey = copyUserData.EncryptedMetadataEncryptedKey
+			expectedUserData.EncryptedMetadataNonce = copyUserData.EncryptedMetadataNonce
+			require.Equal(t, expectedUserData, objectCopy.EncryptedUserData)
+
+			// Confirm that metadata is overridden if OverrideMetadata is true.
+			req.OverrideMetadata = true
+			_, err = endpoint.FinishCopyObject(ctx, req)
+			require.NoError(t, err)
+
+			objectCopy, err = db.GetObjectLastCommitted(ctx, metabase.GetObjectLastCommitted{
+				ObjectLocation: metabase.ObjectLocation{
+					ProjectID:  object.ProjectID,
+					BucketName: metabase.BucketName(bucketName),
+					ObjectKey:  newObjectKey,
+				},
+			})
+			require.NoError(t, err)
+			require.Equal(t, copyUserData, objectCopy.EncryptedUserData)
+		})
+
+		t.Run("FinishCopyObject - Checksums disabled", func(t *testing.T) {
+			endpoint.TestingSetChecksumsEnabled(false)
+			defer endpoint.TestingSetChecksumsEnabled(true)
+
+			bucketName := testrand.BucketName()
+			require.NoError(t, up.TestingCreateBucket(ctx, sat, bucketName))
+
+			object, segments := requireCreateObject(t, bucketName)
+			streamID := requireGetStreamID(t, object.ObjectStream)
+
+			newObjectKey := metabasetest.RandObjectKey()
+			requireBeginCopyObject(t, bucketName, string(object.ObjectKey), bucketName, string(newObjectKey))
+
+			copyUserData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 1)
+			require.NoError(t, err)
+
+			_, err = endpoint.FinishCopyObject(ctx, &pb.FinishCopyObjectRequest{
+				Header:                       &pb.RequestHeader{ApiKey: apiKey.SerializeRaw()},
+				StreamId:                     streamID,
+				NewBucket:                    []byte(bucketName),
+				NewEncryptedObjectKey:        []byte(newObjectKey),
+				NewSegmentKeys:               randNewSegmentKeys(segments),
+				NewEncryptedMetadataKeyNonce: pb.Nonce(copyUserData.EncryptedMetadataNonce),
+				NewEncryptedMetadataKey:      copyUserData.EncryptedMetadataEncryptedKey,
+				NewChecksumAlgorithm:         pb.ObjectChecksumAlgorithm(copyUserData.Checksum.Algorithm),
+				NewIsChecksumComposite:       copyUserData.Checksum.IsComposite,
+				NewEncryptedChecksum:         copyUserData.Checksum.EncryptedValue,
+				OverrideMetadata:             true,
+			})
+			rpctest.RequireStatus(t, err, rpcstatus.ChecksumsUnsupported, checksumsDisabledErrMsg)
+
+			_, err = db.GetObjectLastCommitted(ctx, metabase.GetObjectLastCommitted{
+				ObjectLocation: metabase.ObjectLocation{
+					ProjectID:  object.ProjectID,
+					BucketName: metabase.BucketName(bucketName),
+					ObjectKey:  newObjectKey,
+				},
+			})
+			require.ErrorIs(t, err, metabase.ErrObjectNotFound.Instance())
 		})
 
 		t.Run("Exceeded storage limit", func(t *testing.T) {
@@ -3533,10 +3683,13 @@ func TestUpdateObjectMetadata(t *testing.T) {
 				{
 					name: "Object has custom metadata",
 					userData: func() metabase.EncryptedUserData {
-						userData, err := randEncryptedUserData(metabasetest.DefaultEncryption, 4)
+						userData, err := randEncryptedUserDataWithChecksum(metabasetest.DefaultEncryption, 4)
 						require.NoError(t, err)
-						userData.EncryptedETag = nil
-						return userData
+						return metabase.EncryptedUserData{
+							EncryptedMetadataEncryptedKey: userData.EncryptedMetadataEncryptedKey,
+							EncryptedMetadataNonce:        userData.EncryptedMetadataNonce,
+							EncryptedMetadata:             userData.EncryptedMetadata,
+						}
 					}(),
 					includes: includeAllExcept(pb.ObjectMetadataIncludes{
 						Custom: true,
@@ -8951,18 +9104,7 @@ func TestUploadWithNoPendingObject(t *testing.T) {
 	})
 }
 
-// randEncryptedUserData returns a random set of encrypted user data. The user data's encrypted metadata is safe to unmarshal.
-func randEncryptedUserData(encryption storj.EncryptionParameters, segmentCount int64) (metabase.EncryptedUserData, error) {
-	userData, err := randEncryptedUserDataWithChecksum(encryption, segmentCount)
-	if err != nil {
-		return metabase.EncryptedUserData{}, err
-	}
-	userData.Checksum.Algorithm = storj.ObjectChecksumAlgorithmNone
-	userData.Checksum.IsComposite = false
-	userData.Checksum.EncryptedValue = nil
-	return userData, nil
-}
-
+// randEncryptedUserDataWithChecksum returns a random set of encrypted user data. The user data's encrypted metadata is safe to unmarshal.
 func randEncryptedUserDataWithChecksum(encryption storj.EncryptionParameters, segmentCount int64) (metabase.EncryptedUserData, error) {
 	encryptedUserData := metabasetest.RandEncryptedUserDataWithChecksum()
 	metadata, err := pb.Marshal(&pb.StreamMeta{
