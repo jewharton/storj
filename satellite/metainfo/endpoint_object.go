@@ -1541,13 +1541,7 @@ func (endpoint *Endpoint) ListObjects(ctx context.Context, req *pb.ObjectListReq
 		cursorVersion = sv.Version()
 	}
 
-	var include = includeForObjectEntry{
-		SystemMetadata:       true,
-		CustomMetadata:       true,
-		ETag:                 true,
-		ETagOrCustomMetadata: false,
-		LegacyStreamMeta:     true,
-	}
+	include := includeAllForObjectEntry()
 
 	if req.UseObjectIncludes {
 		include.CustomMetadata = req.ObjectIncludes.Metadata
@@ -1557,6 +1551,7 @@ func (endpoint *Endpoint) ListObjects(ctx context.Context, req *pb.ObjectListReq
 		include.SystemMetadata = status == metabase.Pending || !req.ObjectIncludes.ExcludeSystemMetadata
 		include.ETag = req.ObjectIncludes.IncludeEtag
 		include.ETagOrCustomMetadata = req.ObjectIncludes.IncludeEtagOrCustomMetadata
+		include.Checksum = req.ObjectIncludes.IncludeChecksum
 		// Modern uplinks (those that set use_object_includes) use the top-level
 		// encrypted_metadata_nonce / encrypted_metadata_encrypted_key fields directly,
 		// so there is no need to duplicate the same bytes in StreamMeta.LastSegmentMeta.
@@ -1594,6 +1589,7 @@ func (endpoint *Endpoint) ListObjects(ctx context.Context, req *pb.ObjectListReq
 				IncludeSystemMetadata:       include.SystemMetadata,
 				IncludeETag:                 include.ETag,
 				IncludeETagOrCustomMetadata: include.ETagOrCustomMetadata,
+				IncludeChecksum:             include.Checksum,
 
 				Unversioned: bucket.Versioning.IsUnversioned(),
 				Params:      metabase.ListObjectsParams(endpoint.config.ListObjects),
@@ -2445,6 +2441,7 @@ type includeForObjectEntry struct {
 	CustomMetadata       bool
 	ETag                 bool
 	ETagOrCustomMetadata bool
+	Checksum             bool
 	// LegacyStreamMeta controls whether the encryption key and nonce are duplicated inside
 	// StreamMeta.LastSegmentMeta. Old uplinks that predate the top-level
 	// encrypted_metadata_nonce / encrypted_metadata_encrypted_key fields need this duplication
@@ -2459,6 +2456,7 @@ func includeAllForObjectEntry() includeForObjectEntry {
 		CustomMetadata:       true,
 		ETag:                 true,
 		ETagOrCustomMetadata: false, // implied by CustomMetadata and ETag
+		Checksum:             true,
 		LegacyStreamMeta:     true,
 	}
 }
@@ -2468,7 +2466,7 @@ func includeAllForObjectEntry() includeForObjectEntry {
 func (include *includeForObjectEntry) keyAndNonce(entry *metabase.ObjectEntry) bool {
 	// When there's an explicit request for CustomMetadata it's not quite clear whether the client
 	// wants the stream metadata, so we'll ensure it's always included in that scenario.
-	return include.CustomMetadata || include.customMetadata(entry) || include.etag(entry)
+	return include.CustomMetadata || include.customMetadata(entry) || include.etag(entry) || include.Checksum
 }
 
 // customMetadata checks whether we should include user defined custom metadata.
@@ -2555,6 +2553,12 @@ func (endpoint *Endpoint) objectEntryToProtoListItem(ctx context.Context, bucket
 
 	if include.etag(&entry) {
 		item.EncryptedEtag = entry.EncryptedETag
+	}
+
+	if include.Checksum {
+		item.ChecksumAlgorithm = pb.ObjectChecksumAlgorithm(entry.Checksum.Algorithm)
+		item.IsChecksumComposite = entry.Checksum.IsComposite
+		item.EncryptedChecksum = entry.Checksum.EncryptedValue
 	}
 
 	// Add Stream ID to list items if listing is for pending objects.
